@@ -1,0 +1,213 @@
+#!/bin/bash
+#
+# auto-version-update - Find new versions of software and update things based
+#    on that info
+
+declare -A url_cache;
+declare -A wiki_cache;
+
+get_url_cached () {
+   local url;
+
+   url="${1:-}";
+   [ -z "$url" ] && return 1;
+
+   if [ -z "${url_cache[$url]}" ]; then
+      url_cache[$url]="$(2>/dev/null curl "$url")";
+   fi
+
+   url_content="${url_cache[$url]}";
+}
+
+get_wiki_page_cached () {
+   local wiki;
+   local wiki_page;
+   local cache_id;
+   local tmpfile;
+
+   wiki="${1:-}";
+   wiki_page="${2:-}";
+   [ -z "$wiki" ] && return 1;
+   [ -z "$wiki_page" ] && return 1;
+
+   tmpfile="$(mktemp)";
+
+   cache_id="${wiki} - ${wiki_page}";
+
+   if [ -z "${wiki_cache[$cache_id]}" ]; then
+      2>/dev/null >/dev/null WIKI_URL="$wiki" wiki_article_to_fetch="$wiki_page" wiki_fetch_to_file="$tmpfile" mw-fetch;
+      wiki_cache[$cache_id]="$(cat "$tmpfile")";
+      rm "$tmpfile";
+   fi
+
+   wiki_content="${wiki_cache[$cache_id]}";
+}
+
+# TODO: It might be more lightweight to use release-monitoring.org to detect
+#   the latest VirtualBox release.
+# get_latest_version-virtualbox () {
+#    get_url_cached 'https://release-monitoring.org/api/v2/packages/?name=Virtualbox'
+#    jq '.items[] | select ( contains({distribution: "Windows"}) ) | .version' <<< "$url_content";
+# }
+
+extract_url () {
+   local content;
+   local regex;
+
+   content="${1:-}";
+   regex="${2:-}";
+   [ -z "$content" ] && return 1;
+   [ -z "$regex" ] && return 1;
+
+   while read -r line; do
+      if [[ "$line" =~ $regex ]]; then
+         result="$(perl -p -e "s/.*(${regex}).*/\1/" <<< "$line")";
+      fi;
+   done <<< "$content";
+
+   echo "$result";
+}
+
+get_url_from_page () {
+   local dl_page;
+   local release_regex;
+   local line;
+   local result;
+
+   dl_page="${1:-}";
+   release_regex="${2:-}";
+   [ -z "$dl_page" ] && return 1;
+   [ -z "$release_regex" ] && return 1;
+
+   get_url_cached "$dl_page";
+   readarray -t result < <(extract_url "$url_content" "$release_regex");
+
+   if [ "${#result[@]}" != '1' ]; then
+      1>&2 echo 'WARNING - more than one URL found for download!';
+   elif [ -z "${result[0]}" ]; then
+      1>&2 echo 'WARNING - no URL found!';
+   fi
+
+   func_result="${result[0]}";
+}
+
+get_url_from_wiki () {
+   local wiki;
+   local wiki_page;
+   local release_regex;
+   local content;
+   local result;
+
+   wiki="${1:-}";
+   wiki_page="${2:-}";
+   release_regex="${3:-}";
+   [ -z "$wiki" ] && return 1;
+   [ -z "$wiki_page" ] && return 1;
+   [ -z "$release_regex" ] && return 1;
+
+   get_wiki_page_cached "$wiki" "$wiki_page";
+   readarray -t result < <(extract_url "$wiki_content" "$release_regex");
+
+   if [ "${#result[@]}" != '1' ]; then
+      1>&2 echo 'WARNING - more than one URL found for download!';
+   elif [ -z "${result[0]}" ]; then
+      1>&2 echo 'WARNING - no URL found!';
+   fi
+
+   func_result="${result[0]}";
+}
+
+replace_wiki_string () {
+   local wiki;
+   local wiki_page;
+   local orig_string;
+   local new_string;
+   local cache_id;
+   local tmpfile;
+   local py_replace_script;
+
+   wiki="${1:-}";
+   wiki_page="${2:-}";
+   orig_string="${3:-}";
+   new_string="${4:-}";
+   [ -z "$wiki" ] && return 1;
+   [ -z "$wiki_page" ] && return 1;
+   [ -z "$orig_string" ] && return 1;
+   [ -z "$new_string" ] && return 1;
+
+   
+   cache_id="${wiki} - ${wiki_page}";
+   wiki_content="${wiki_cache[$cache_id]}";
+   [ -z "$wiki_content" ] && return 1;
+
+   # Bash lacks a good way to do a verbatim string replace, so we use Python to do that part.
+   tmpfile="$(mktemp)";
+   echo "$wiki_content" > "$tmpfile";
+   py_replace_script="$(cat <<EOF
+import os;
+
+orig_string = os.environ['orig_string']
+new_string = os.environ['new_string']
+tmpfile = os.environ['tmpfile']
+
+with open(tmpfile, 'r') as file:
+   content = file.read()
+
+content = content.replace(orig_string, new_string)
+with open(tmpfile, 'w') as file:
+   file.write(content)
+EOF
+   )";
+   orig_string="$orig_string" new_string="$new_string" tmpfile="$tmpfile" python3 <<< "$py_replace_script";
+
+   wiki_content="$(cat "$tmpfile")";
+   wiki_cache[$cache_id]="$wiki_content";
+
+   rm "$tmpfile";
+}
+
+declare kicksecure_wiki kicksecure_wiki_vbox_page vbox_download_page vbox_win_regex vbox_macos_regex;
+kicksecure_wiki='https://www.kicksecure.com/w';
+kicksecure_wiki_vbox_page='Template:VirtualBox_Host_Software_Installation';
+vbox_download_page='https://www.virtualbox.org/wiki/Downloads';
+vbox_win_regex='https:\/\/download.virtualbox.org\/virtualbox\/.*\/VirtualBox-.*Win\.exe';
+vbox_macos_regex='https:\/\/download.virtualbox.org\/virtualbox\/.*\/VirtualBox-.*OSX.dmg';
+
+# TODO: Templates for future work
+# get_latest_version-tor-browser () {
+#    true;
+# }
+#
+# get_latest_version-tor-browser-alpha () {
+#    true;
+# }
+#
+# get_current_version-tor-browser () {
+#    true;
+# }
+#
+# get_current_version-tor-browser-alpha () {
+#    true;
+# }
+
+
+main () {
+   local vbox_win_latest vbox_macos_latest vbox_win_current vbox_macos_current;
+
+   get_url_from_page "$vbox_download_page" "$vbox_win_regex";   vbox_win_latest="$func_result";
+   get_url_from_page "$vbox_download_page" "$vbox_macos_regex"; vbox_macos_latest="$func_result";
+   get_url_from_wiki "$kicksecure_wiki" "$kicksecure_wiki_vbox_page" "$vbox_win_regex";   vbox_win_current="$func_result";
+   get_url_from_wiki "$kicksecure_wiki" "$kicksecure_wiki_vbox_page" "$vbox_macos_regex"; vbox_macos_current="$func_result";
+
+   if [ "$vbox_win_latest" != "$vbox_win_current" ]; then
+      replace_wiki_string "$kicksecure_wiki" "$kicksecure_wiki_vbox_page" "$vbox_win_current" "$vbox_win_latest";
+   fi
+   if [ "$vbox_macos_latest" != "$vbox_macos_current" ]; then
+      replace_wiki_string "$kicksecure_wiki" "$kicksecure_wiki_vbox_page" "$vbox_macos_current" "$vbox_macos_latest";
+   fi
+
+   get_wiki_page_cached "$kicksecure_wiki" "$kicksecure_wiki_vbox_page";
+   echo "$wiki_content";
+}
+
+main "$@";
